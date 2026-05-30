@@ -86,7 +86,7 @@ router = Router()
 
 _KEYWORDS = frozenset(["блокнот", "очисти"])
 
-_NAME_CODE_RE = re.compile(r"^(\d{1,3})\.(\d{1,3})$")
+_NAME_CODE_RE = re.compile(r"^(\d{1,3})[.,ю](\d{1,3})$")
 
 WELCOME = (
     "<b>Бот поиска счётчиков электроэнергии</b>\n\n"
