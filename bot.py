@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import logging.handlers
+import re
 from io import BytesIO
 from pathlib import Path
 from typing import Any, Callable, Awaitable
@@ -84,6 +85,8 @@ class AccessMiddleware(BaseMiddleware):
 router = Router()
 
 _KEYWORDS = frozenset(["блокнот", "очисти"])
+
+_NAME_CODE_RE = re.compile(r"^(\d{1,3})\.(\d{1,3})$")
 
 WELCOME = (
     "<b>Бот поиска счётчиков электроэнергии</b>\n\n"
@@ -202,6 +205,12 @@ async def handle_photo(message: Message, bot: Bot) -> None:
 async def handle_text(message: Message) -> None:
     serial = message.text.strip()
     if not serial:
+        return
+    m = _NAME_CODE_RE.match(serial)
+    if m:
+        left, right = int(m.group(1)), int(m.group(2))
+        row = await db.get_counter_by_name_code(left, right)
+        await _show_counter(message, row, serial)
         return
     row = await db.get_counter_by_serial(serial)
     await _show_counter(message, row, serial)
