@@ -65,8 +65,10 @@ async def get_counter_by_barcode(barcode: str) -> dict | None:
 
 
 async def get_counter_by_name_code(left: int, right: int) -> dict | None:
-    """Поиск по шаблону N.M внутри скобок в поле Name (без учёта ведущих нулей)."""
-    pattern = f'\\(0*{left}\\.0*{right}\\)'
+    """Поиск по шаблону N.M внутри скобок в поле Name (без учёта ведущих нулей).
+    Паттерн вида '\\([^0-9)]*0*N\\.0*M[^)]*\\)' допускает текст вроде '(Эл.сч.28.37)'.
+    """
+    pattern = f'\\([^0-9)]*0*{left}\\.0*{right}[^)]*\\)'
     sql = _COUNTER_QUERY.format(where="WHERE c.Name REGEXP %s")
     return await _query_one(sql, (pattern,))
 
