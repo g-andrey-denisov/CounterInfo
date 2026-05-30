@@ -1,0 +1,67 @@
+import aiomysql
+from config import settings
+
+_pool: aiomysql.Pool | None = None
+
+
+async def init_pool() -> None:
+    global _pool
+    _pool = await aiomysql.create_pool(
+        host=settings.DB_HOST,
+        port=settings.DB_PORT,
+        user=settings.DB_USER,
+        password=settings.DB_PASSWORD,
+        db=settings.DB_NAME,
+        charset="utf8mb4",
+        minsize=1,
+        maxsize=5,
+        autocommit=True,
+    )
+
+
+async def close_pool() -> None:
+    if _pool:
+        _pool.close()
+        await _pool.wait_closed()
+
+
+_COUNTER_QUERY = """
+    SELECT
+        c.Name,
+        c.SerialNumber,
+        c.State,
+        cons.Consumption,
+        cons.UpdateTime
+    FROM counter c
+    LEFT JOIN consumption cons
+        ON c.Obj_Id_Counter = cons.Obj_Id_Counter
+    {where}
+    ORDER BY cons.UpdateTime DESC
+    LIMIT 1
+"""
+
+
+async def _query_one(sql: str, params: tuple) -> dict | None:
+    async with _pool.acquire() as conn:
+        async with conn.cursor(aiomysql.DictCursor) as cur:
+            await cur.execute(sql, params)
+            return await cur.fetchone()
+
+
+async def get_counter_by_serial(serial: str) -> dict | None:
+    """Точное совпадение по серийному номеру (ручной ввод)."""
+    sql = _COUNTER_QUERY.format(where="WHERE c.SerialNumber = %s")
+    return await _query_one(sql, (serial,))
+
+
+async def get_counter_by_barcode(barcode: str) -> dict | None:
+    """Поиск счётчика, чей серийный номер является подстрокой штрих-кода."""
+    sql = _COUNTER_QUERY.format(where="WHERE INSTR(%s, c.SerialNumber) > 0")
+    return await _query_one(sql, (barcode,))
+
+
+async def get_all_counters() -> list[dict]:
+    async with _pool.acquire() as conn:
+        async with conn.cursor(aiomysql.DictCursor) as cur:
+            await cur.execute("SELECT SerialNumber, Name, State FROM counter")
+            return await cur.fetchall()

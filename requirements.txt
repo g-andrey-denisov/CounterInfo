@@ -1,0 +1,7 @@
+aiogram>=3.7
+aiomysql>=0.2
+Pillow>=10.0
+zxing-cpp>=2.2
+python-dotenv>=1.0
+watchfiles>=0.21
+aiosqlite>=0.19
