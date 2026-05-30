@@ -290,12 +290,13 @@ async def cb_save_notebook(
             ]
         ]
     )
-    await query.message.answer(
+    prompt_msg = await query.message.answer(
         "Введите <b>комментарий</b> к записи (показания, заметки и т.д.) "
         "или нажмите «Пропустить»:",
         parse_mode="HTML",
         reply_markup=kb,
     )
+    await state.update_data(prompt_msg_id=prompt_msg.message_id)
     await state.set_state(Form.waiting_comment)
 
 
@@ -303,12 +304,23 @@ async def cb_save_notebook(
 
 
 @router.message(Form.waiting_comment, F.text)
-async def handle_comment(message: Message, state: FSMContext) -> None:
+async def handle_comment(message: Message, state: FSMContext, bot: Bot) -> None:
+    data = await state.get_data()
+    prompt_msg_id = data.get("prompt_msg_id")
     entry_id = _pending_entry.pop(message.from_user.id, None)
     comment = message.text.strip()
     if entry_id and comment:
         await local_db.update_notebook_comment(entry_id, comment)
     await state.clear()
+    if prompt_msg_id:
+        try:
+            await bot.edit_message_reply_markup(
+                chat_id=message.chat.id,
+                message_id=prompt_msg_id,
+                reply_markup=None,
+            )
+        except Exception:
+            pass
     await message.answer(
         f"Запись сохранена. Комментарий: <b>{comment or 'не указано'}</b>",
         parse_mode="HTML",
@@ -321,7 +333,7 @@ async def cb_skip_reading(query: CallbackQuery, state: FSMContext) -> None:
     await state.clear()
     await query.message.edit_reply_markup(reply_markup=None)
     await query.answer("Пропущено.")
-    await query.message.answer("Запись сохранена без реальных показаний.")
+    await query.message.answer("Запись сохранена.")
 
 
 # ── Вспомогательные ───────────────────────────────────────────────────────────
