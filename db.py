@@ -49,15 +49,19 @@ async def _query_one(sql: str, params: tuple) -> dict | None:
 
 
 async def get_counter_by_serial(serial: str) -> dict | None:
-    """Точное совпадение по серийному номеру (ручной ввод)."""
-    sql = _COUNTER_QUERY.format(where="WHERE c.SerialNumber = %s")
-    return await _query_one(sql, (serial,))
+    """Точное совпадение по серийному номеру (без учёта ведущих нулей)."""
+    sql = _COUNTER_QUERY.format(
+        where="WHERE TRIM(LEADING '0' FROM c.SerialNumber) = %s"
+    )
+    return await _query_one(sql, (serial.lstrip("0"),))
 
 
 async def get_counter_by_barcode(barcode: str) -> dict | None:
-    """Поиск счётчика, чей серийный номер является подстрокой штрих-кода."""
-    sql = _COUNTER_QUERY.format(where="WHERE INSTR(%s, c.SerialNumber) > 0")
-    return await _query_one(sql, (barcode,))
+    """Поиск счётчика, чей серийный номер является подстрокой штрих-кода (без учёта ведущих нулей)."""
+    sql = _COUNTER_QUERY.format(
+        where="WHERE INSTR(%s, TRIM(LEADING '0' FROM c.SerialNumber)) > 0"
+    )
+    return await _query_one(sql, (barcode.lstrip("0"),))
 
 
 async def get_all_counters() -> list[dict]:

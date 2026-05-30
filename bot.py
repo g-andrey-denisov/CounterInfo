@@ -123,7 +123,7 @@ async def cmd_notebook(message: Message, state: FSMContext) -> None:
         comment = e["comment"] or "не указано"
         lines.append(
             f"<b>#{i}</b>  {e['ts']}\n"
-            f"Серийный:   <code>{e['serial_number']}</code>\n"
+            f"Серийный:   <code>{_fmt_serial(e['serial_number'])}</code>\n"
             f"Название:   {e['name'] or '—'}\n"
             f"Состояние:  {e['state'] or '—'}\n"
             f"Показ.(БД): {e['db_consumption'] or '—'}\n"
@@ -243,7 +243,7 @@ async def _show_counter(message: Message, row: dict | None, query: str) -> None:
     )
     await message.answer(
         f"<b>Счётчик найден</b>\n\n"
-        f"<b>Серийный номер:</b> <code>{row['SerialNumber']}</code>\n"
+        f"<b>Серийный номер:</b> <code>{_fmt_serial(row['SerialNumber'])}</code>\n"
         f"<b>Название:</b> {row['Name']}\n"
         f"<b>Состояние:</b> {state_val}\n"
         f"<b>Потребление:</b> {consumption}\n"
@@ -337,6 +337,10 @@ async def cb_skip_reading(query: CallbackQuery, state: FSMContext) -> None:
 
 
 # ── Вспомогательные ───────────────────────────────────────────────────────────
+
+
+def _fmt_serial(s: str) -> str:
+    return s.zfill(8)
 
 
 def _plural(n: int, one: str, few: str, many: str) -> str:
