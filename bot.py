@@ -16,6 +16,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import (
+    BotCommand,
     CallbackQuery,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
@@ -944,6 +945,13 @@ async def main() -> None:
         logger.info("Counter cache synced: %d entries", len(counters))
 
     bot = Bot(token=settings.BOT_TOKEN)
+    await bot.set_my_commands([
+        BotCommand(command="help",     description="Справка"),
+        BotCommand(command="notebook", description="Блокнот"),
+        BotCommand(command="clear",    description="Очистить блокнот"),
+        BotCommand(command="checkup",  description="Режим проверки"),
+        BotCommand(command="checkups", description="Журнал проверок"),
+    ])
     dp = Dispatcher(storage=MemoryStorage())
     dp.message.middleware(AccessMiddleware())
     dp.callback_query.middleware(AccessMiddleware())
