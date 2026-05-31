@@ -285,14 +285,17 @@ def _format_period_table(
     first_val = non_empty[0] if non_empty else "нет"
     last_val = non_empty[-1] if len(non_empty) > 1 else first_val
 
-    HS1, HS2 = "Первые", "Последние"
+    total_val = diff_str(first_val, last_val)
+
+    HS1, HS2, HS3 = "Первые", "Последние", "Всего"
     ws1 = max(len(HS1), len(first_val))
     ws2 = max(len(HS2), len(last_val))
+    ws3 = max(len(HS3), len(total_val))
     lines += [
         "",
-        f"{HS1:<{ws1}}  {HS2}",
-        f"{'-'*ws1}  {'-'*ws2}",
-        f"{first_val:<{ws1}}  {last_val}",
+        f"{HS1:<{ws1}}  {HS2:<{ws2}}  {HS3}",
+        f"{'-'*ws1}  {'-'*ws2}  {'-'*ws3}",
+        f"{first_val:<{ws1}}  {last_val:<{ws2}}  {total_val}",
     ]
 
     correction_note = ""
