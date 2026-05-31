@@ -1,3 +1,5 @@
+from datetime import datetime, timedelta
+
 import aiomysql
 from config import settings
 
@@ -27,6 +29,7 @@ async def close_pool() -> None:
 
 _COUNTER_QUERY = """
     SELECT
+        c.Obj_Id_Counter,
         c.Name,
         c.SerialNumber,
         c.State,
@@ -76,3 +79,89 @@ async def get_all_counters() -> list[dict]:
         async with conn.cursor(aiomysql.DictCursor) as cur:
             await cur.execute("SELECT SerialNumber, Name, State FROM counter")
             return await cur.fetchall()
+
+
+async def get_consumption_around_date(counter_id: int, date_str: str) -> dict:
+    """
+    Возвращает dict с ключами:
+      before   — последняя запись ДО начала date_str (или None)
+      on_date  — последняя запись ЗА date_str (или None)
+      after    — первая запись ПОСЛЕ date_str, только если on_date is None (или None)
+    """
+    day_start = f"{date_str} 00:00:00"
+    day_end = (
+        datetime.strptime(date_str, "%Y-%m-%d") + timedelta(days=1)
+    ).strftime("%Y-%m-%d 00:00:00")
+
+    async with _pool.acquire() as conn:
+        async with conn.cursor(aiomysql.DictCursor) as cur:
+            await cur.execute(
+                "SELECT Consumption, UpdateTime FROM consumption "
+                "WHERE Obj_Id_Counter = %s AND UpdateTime < %s "
+                "ORDER BY UpdateTime DESC LIMIT 1",
+                (counter_id, day_start),
+            )
+            before = await cur.fetchone()
+
+            await cur.execute(
+                "SELECT Consumption, UpdateTime FROM consumption "
+                "WHERE Obj_Id_Counter = %s AND UpdateTime >= %s AND UpdateTime < %s "
+                "ORDER BY UpdateTime DESC LIMIT 1",
+                (counter_id, day_start, day_end),
+            )
+            on_date = await cur.fetchone()
+
+            after = None
+            if not on_date:
+                await cur.execute(
+                    "SELECT Consumption, UpdateTime FROM consumption "
+                    "WHERE Obj_Id_Counter = %s AND UpdateTime >= %s "
+                    "ORDER BY UpdateTime ASC LIMIT 1",
+                    (counter_id, day_end),
+                )
+                after = await cur.fetchone()
+
+    return {"before": before, "on_date": on_date, "after": after}
+
+
+async def get_consumption_for_period(
+    counter_id: int, start_date: str, end_date: str
+) -> dict:
+    """
+    Возвращает данные для построения таблицы показаний за период:
+      pre        — последняя запись ДО начала периода
+      in_period  — все записи в пределах периода (ASC)
+      post       — первая запись ПОСЛЕ окончания периода
+    """
+    period_start = f"{start_date} 00:00:00"
+    period_end = (
+        datetime.strptime(end_date, "%Y-%m-%d") + timedelta(days=1)
+    ).strftime("%Y-%m-%d 00:00:00")
+
+    async with _pool.acquire() as conn:
+        async with conn.cursor(aiomysql.DictCursor) as cur:
+            await cur.execute(
+                "SELECT Consumption, UpdateTime FROM consumption "
+                "WHERE Obj_Id_Counter = %s AND UpdateTime < %s "
+                "ORDER BY UpdateTime DESC LIMIT 1",
+                (counter_id, period_start),
+            )
+            pre = await cur.fetchone()
+
+            await cur.execute(
+                "SELECT Consumption, UpdateTime FROM consumption "
+                "WHERE Obj_Id_Counter = %s AND UpdateTime >= %s AND UpdateTime < %s "
+                "ORDER BY UpdateTime ASC",
+                (counter_id, period_start, period_end),
+            )
+            in_period = list(await cur.fetchall())
+
+            await cur.execute(
+                "SELECT Consumption, UpdateTime FROM consumption "
+                "WHERE Obj_Id_Counter = %s AND UpdateTime >= %s "
+                "ORDER BY UpdateTime ASC LIMIT 1",
+                (counter_id, period_end),
+            )
+            post = await cur.fetchone()
+
+    return {"pre": pre, "in_period": in_period, "post": post}

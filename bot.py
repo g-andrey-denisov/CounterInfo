@@ -1,8 +1,9 @@
 import asyncio
+import calendar
 import logging
 import logging.handlers
 import re
-from datetime import datetime
+from datetime import datetime, timedelta
 from io import BytesIO
 from pathlib import Path
 from typing import Any, Callable, Awaitable
@@ -51,6 +52,21 @@ class CheckupsForm(StatesGroup):
     waiting_date = State()
 
 
+class ReadingForm(StatesGroup):
+    waiting_query = State()
+    waiting_date = State()
+
+
+class PeriodForm(StatesGroup):
+    waiting_query = State()
+    waiting_period = State()
+
+
+class MonthlyForm(StatesGroup):
+    waiting_query = State()
+    waiting_year = State()
+
+
 # ── Callback data ─────────────────────────────────────────────────────────────
 
 
@@ -84,6 +100,17 @@ class ExitUncheckedCb(CallbackData, prefix="exu"):
 
 class CheckupsDateCb(CallbackData, prefix="csd"):
     date: str  # ISO YYYY-MM-DD
+
+
+class PeriodPresetCb(CallbackData, prefix="pps"):
+    start: str  # ISO YYYY-MM-DD
+    end: str    # ISO YYYY-MM-DD
+
+
+class ReadingDateCb(CallbackData, prefix="rdt"):
+    date: str  # ISO YYYY-MM-DD
+
+
 
 
 class CheckupsPageCb(CallbackData, prefix="csp"):
@@ -128,7 +155,7 @@ class AccessMiddleware(BaseMiddleware):
 
 router = Router()
 
-_KEYWORDS = frozenset(["блокнот", "очисти", "проверка", "проверки"])
+_KEYWORDS = frozenset(["блокнот", "очисти", "проверка", "проверки", "показания", "период", "месяцы"])
 
 _CHECKUP_PAGE_SIZE = 15
 _CHECKUPS_PAGE_SIZE = 10
@@ -155,8 +182,17 @@ WELCOME = (
     "  /clear — очистить блокнот\n"
     "  /checkup (/check) — режим проверки\n"
     "  /checkups — журнал проверок\n"
+    "  /reading, <b>Показания</b> — показания на дату\n"
+    "      выбор из кнопок или ввод вручную (дд.мм.гггг)\n"
+    "  /period, <b>Период</b> — посуточный отчёт (до 90 дней)\n"
+    "      быстрый выбор или ввод вручную (дд.мм.гггг - дд.мм.гггг)\n"
+    "      неправильные даты корректируются автоматически\n"
+    "  /monthly, <b>Месяцы</b> — помесячный отчёт (до 5 лет)\n"
+    "      ввод года или диапазона (гггг или гггг-гггг)\n"
     "  /help — эта справка\n\n"
-    "Ключевые слова: <b>Блокнот</b>, <b>Очисти</b>, <b>Проверка</b>, <b>Проверки</b>."
+    "<b>Все отчёты</b> содержат столбец <b>Итого</b> — разница показаний за период.\n\n"
+    "Ключевые слова: <b>Блокнот</b>, <b>Очисти</b>, <b>Проверка</b>, <b>Проверки</b>, "
+    "<b>Показания</b>, <b>Период</b>, <b>Месяцы</b>."
 )
 
 # ── /start, /help ─────────────────────────────────────────────────────────────
@@ -667,6 +703,710 @@ async def _save_checkup(from_user, state: FSMContext, comment: str | None) -> st
     )
 
 
+# ── /reading + слово "Показания" ─────────────────────────────────────────────
+
+
+@router.message(Command("reading"))
+@router.message(F.text.func(lambda t: bool(t) and t.strip().lower() == "показания"))
+async def cmd_reading(message: Message, state: FSMContext) -> None:
+    await state.clear()
+    await state.set_state(ReadingForm.waiting_query)
+    await message.answer(
+        "<b>Показания на дату</b>\n\n"
+        "Введите серийный номер, код N.М или отправьте фото со штрих-кодом.",
+        parse_mode="HTML",
+        reply_markup=ReplyKeyboardRemove(),
+    )
+
+
+@router.message(ReadingForm.waiting_query, F.text)
+async def reading_handle_text(message: Message, state: FSMContext) -> None:
+    serial = message.text.strip()
+    if not serial:
+        return
+    m = _NAME_CODE_RE.match(serial)
+    if m:
+        left = m.group(1).zfill(2)
+        right = m.group(2).zfill(2)
+        row = await db.get_counter_by_name_code(left, right)
+    else:
+        row = await db.get_counter_by_serial(serial)
+    await _reading_store_counter(message, state, row, serial)
+
+
+@router.message(ReadingForm.waiting_query, F.photo)
+async def reading_handle_photo(message: Message, state: FSMContext, bot: Bot) -> None:
+    await message.answer("Распознаю штрих-код...")
+    photo = message.photo[-1]
+    file = await bot.get_file(photo.file_id)
+    buf = BytesIO()
+    await bot.download_file(file.file_path, destination=buf)
+
+    results = zxingcpp.read_barcodes(Image.open(buf))
+    if not results:
+        await message.answer(
+            "Штрих-код не найден на фото.\n"
+            "Попробуйте более чёткий снимок или введите номер вручную."
+        )
+        return
+
+    barcode = results[0].text.strip()
+    row = await db.get_counter_by_barcode(barcode)
+    await _reading_store_counter(message, state, row, barcode)
+
+
+def _reading_date_kb() -> InlineKeyboardMarkup:
+    today = datetime.now().date()
+    yesterday = today - timedelta(days=1)
+    first_current = today.replace(day=1)
+    last_prev = first_current - timedelta(days=1)
+    first_prev = last_prev.replace(day=1)
+
+    def _btn(label: str, d) -> InlineKeyboardButton:
+        return InlineKeyboardButton(
+            text=f"{label} · {d.strftime('%d.%m.%Y')}",
+            callback_data=ReadingDateCb(date=d.strftime("%Y-%m-%d")).pack(),
+        )
+
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [_btn("1-й пред. месяца", first_prev)],
+        [_btn("Посл. пред. месяца", last_prev)],
+        [_btn("1-й тек. месяца", first_current)],
+        [_btn("Вчера", yesterday)],
+        [_btn("Сегодня", today)],
+    ])
+
+
+async def _reading_store_counter(
+    message: Message, state: FSMContext, row: dict | None, query: str
+) -> None:
+    if row is None:
+        await message.answer(
+            f"Счётчик <code>{query}</code> не найден. Попробуйте ещё раз.",
+            parse_mode="HTML",
+        )
+        return
+    await state.update_data(
+        reading_counter_id=row["Obj_Id_Counter"],
+        reading_name=row["Name"],
+        reading_serial=row["SerialNumber"],
+    )
+    await state.set_state(ReadingForm.waiting_date)
+    await message.answer(
+        f"<b>{row['Name']}</b>  <code>{_fmt_serial(row['SerialNumber'])}</code>\n\n"
+        "Выберите дату или введите в формате <b>дд.мм.гггг</b>:",
+        parse_mode="HTML",
+        reply_markup=_reading_date_kb(),
+    )
+
+
+@router.callback_query(ReadingDateCb.filter(), StateFilter(ReadingForm.waiting_date))
+async def cb_reading_date(
+    query: CallbackQuery, callback_data: ReadingDateCb, state: FSMContext
+) -> None:
+    await query.message.edit_reply_markup(reply_markup=None)
+    await query.answer()
+    data = await state.get_data()
+    await state.clear()
+    readings = await db.get_consumption_around_date(
+        data["reading_counter_id"], callback_data.date
+    )
+    await query.message.answer(
+        _format_readings(data["reading_name"], data["reading_serial"], callback_data.date, readings),
+        parse_mode="HTML",
+    )
+
+
+
+@router.message(ReadingForm.waiting_date, F.text)
+async def reading_handle_date(message: Message, state: FSMContext) -> None:
+    iso_date = _parse_input_date(message.text.strip())
+    if iso_date is None:
+        await message.answer(
+            "Неверный формат. Введите дату как <b>дд.мм.гггг</b>:", parse_mode="HTML"
+        )
+        return
+
+    data = await state.get_data()
+    await state.clear()
+
+    counter_id = data["reading_counter_id"]
+    name = data["reading_name"]
+    serial = data["reading_serial"]
+
+    readings = await db.get_consumption_around_date(counter_id, iso_date)
+    await message.answer(
+        _format_readings(name, serial, iso_date, readings),
+        parse_mode="HTML",
+    )
+
+
+def _format_readings(name: str, serial: str, iso_date: str, readings: dict) -> str:
+    before = readings["before"]
+    on_date = readings["on_date"]
+    after = readings["after"]
+
+    col_serial = _fmt_serial(serial)
+    col_before = _fmt_consumption(before)
+    col_third = _fmt_consumption(on_date) if on_date else (_fmt_consumption(after) if after else "нет")
+    col_diff = _diff_str(col_before, col_third)
+
+    H1, H2, H3, H4 = "Серийный", "До", "На дату", "Итого"
+    w1 = max(len(H1), len(col_serial))
+    w2 = max(len(H2), len(col_before))
+    w3 = max(len(H3), len(col_third))
+
+    lines = [
+        f"{H1:<{w1}}  {H2:<{w2}}  {H3:<{w3}}  {H4}",
+        f"{'-'*w1}  {'-'*w2}  {'-'*w3}  {'-'*len(H4)}",
+        f"{col_serial:<{w1}}  {col_before:<{w2}}  {col_third:<{w3}}  {col_diff}",
+    ]
+    date_str = _fmt_iso_date(iso_date)
+    header = f"<b>Показания на {date_str}</b>\n\n<b>Название:</b> {name}\n\n"
+    return header + "<pre>" + "\n".join(lines) + "</pre>"
+
+
+# ── /period + слово "Период" ──────────────────────────────────────────────────
+
+_PERIOD_MAX_DAYS = 90
+
+
+@router.message(Command("period"))
+@router.message(F.text.func(lambda t: bool(t) and t.strip().lower() == "период"))
+async def cmd_period(message: Message, state: FSMContext) -> None:
+    await state.clear()
+    await state.set_state(PeriodForm.waiting_query)
+    await message.answer(
+        "<b>Показания за период</b>\n\n"
+        "Введите серийный номер, код N.М или отправьте фото со штрих-кодом.",
+        parse_mode="HTML",
+        reply_markup=ReplyKeyboardRemove(),
+    )
+
+
+@router.message(PeriodForm.waiting_query, F.text)
+async def period_handle_text(message: Message, state: FSMContext) -> None:
+    serial = message.text.strip()
+    if not serial:
+        return
+    m = _NAME_CODE_RE.match(serial)
+    if m:
+        left = m.group(1).zfill(2)
+        right = m.group(2).zfill(2)
+        row = await db.get_counter_by_name_code(left, right)
+    else:
+        row = await db.get_counter_by_serial(serial)
+    await _period_store_counter(message, state, row, serial)
+
+
+@router.message(PeriodForm.waiting_query, F.photo)
+async def period_handle_photo(message: Message, state: FSMContext, bot: Bot) -> None:
+    await message.answer("Распознаю штрих-код...")
+    photo = message.photo[-1]
+    file = await bot.get_file(photo.file_id)
+    buf = BytesIO()
+    await bot.download_file(file.file_path, destination=buf)
+
+    results = zxingcpp.read_barcodes(Image.open(buf))
+    if not results:
+        await message.answer(
+            "Штрих-код не найден на фото.\n"
+            "Попробуйте более чёткий снимок или введите номер вручную."
+        )
+        return
+
+    barcode = results[0].text.strip()
+    row = await db.get_counter_by_barcode(barcode)
+    await _period_store_counter(message, state, row, barcode)
+
+
+def _period_preset_kb() -> InlineKeyboardMarkup:
+    today = datetime.now().date()
+    first_current = today.replace(day=1)
+    last_prev = first_current - timedelta(days=1)
+    first_prev = last_prev.replace(day=1)
+    monday = today - timedelta(days=today.weekday())
+    prev_monday = monday - timedelta(days=7)
+    prev_sunday = monday - timedelta(days=1)
+
+    def _btn(label: str, s, e) -> InlineKeyboardButton:
+        return InlineKeyboardButton(
+            text=label,
+            callback_data=PeriodPresetCb(
+                start=s.strftime("%Y-%m-%d"),
+                end=e.strftime("%Y-%m-%d"),
+            ).pack(),
+        )
+
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [_btn(
+            f"Пред. месяц · {first_prev.strftime('%d.%m')}–{last_prev.strftime('%d.%m.%Y')}",
+            first_prev, last_prev,
+        )],
+        [_btn(
+            f"Тек. месяц · {first_current.strftime('%d.%m')}–{today.strftime('%d.%m.%Y')}",
+            first_current, today,
+        )],
+        [_btn(
+            f"Пред. неделя · {prev_monday.strftime('%d.%m')}–{prev_sunday.strftime('%d.%m.%Y')}",
+            prev_monday, prev_sunday,
+        )],
+        [_btn(
+            f"Текущая неделя · {monday.strftime('%d.%m')}–{today.strftime('%d.%m.%Y')}",
+            monday, today,
+        )],
+    ])
+
+
+async def _period_store_counter(
+    message: Message, state: FSMContext, row: dict | None, query: str
+) -> None:
+    if row is None:
+        await message.answer(
+            f"Счётчик <code>{query}</code> не найден. Попробуйте ещё раз.",
+            parse_mode="HTML",
+        )
+        return
+    await state.update_data(
+        period_counter_id=row["Obj_Id_Counter"],
+        period_name=row["Name"],
+        period_serial=row["SerialNumber"],
+    )
+    await state.set_state(PeriodForm.waiting_period)
+    await message.answer(
+        f"<b>{row['Name']}</b>  <code>{_fmt_serial(row['SerialNumber'])}</code>\n\n"
+        f"Выберите период или введите в формате <b>дд.мм.гггг - дд.мм.гггг</b>\n"
+        f"(максимум {_PERIOD_MAX_DAYS} дней):",
+        parse_mode="HTML",
+        reply_markup=_period_preset_kb(),
+    )
+
+
+@router.callback_query(PeriodPresetCb.filter(), StateFilter(PeriodForm.waiting_period))
+async def cb_period_preset(
+    query: CallbackQuery, callback_data: PeriodPresetCb, state: FSMContext
+) -> None:
+    await query.message.edit_reply_markup(reply_markup=None)
+    await query.answer()
+    data = await state.get_data()
+    await state.clear()
+
+    counter_id = data["period_counter_id"]
+    name = data["period_name"]
+    serial = data["period_serial"]
+
+    start_iso, end_iso = callback_data.start, callback_data.end
+    raw = await db.get_consumption_for_period(counter_id, start_iso, end_iso)
+    rows = _build_period_rows(start_iso, end_iso, raw["pre"], raw["in_period"], raw["post"])
+    text = _format_period_table(name, serial, start_iso, end_iso, rows)
+    await query.message.answer(text, parse_mode="HTML")
+
+
+@router.message(PeriodForm.waiting_period, F.text)
+async def period_handle_period(message: Message, state: FSMContext) -> None:
+    parsed = _parse_period_input(message.text.strip())
+    if parsed is None:
+        await message.answer(
+            "Неверный формат. Введите период как <b>дд.мм.гггг - дд.мм.гггг</b>:",
+            parse_mode="HTML",
+        )
+        return
+
+    start_iso, end_iso, corrections = parsed
+    start_dt = datetime.strptime(start_iso, "%Y-%m-%d")
+    end_dt = datetime.strptime(end_iso, "%Y-%m-%d")
+
+    if end_dt < start_dt:
+        await message.answer(
+            "Начало периода не может быть позже его конца. Попробуйте снова:"
+        )
+        return
+
+    delta = (end_dt - start_dt).days + 1
+    if delta > _PERIOD_MAX_DAYS:
+        await message.answer(
+            f"Период не может превышать {_PERIOD_MAX_DAYS} дней "
+            f"(запрошено {delta}). Попробуйте снова:"
+        )
+        return
+
+    data = await state.get_data()
+    await state.clear()
+
+    counter_id = data["period_counter_id"]
+    name = data["period_name"]
+    serial = data["period_serial"]
+
+    raw = await db.get_consumption_for_period(counter_id, start_iso, end_iso)
+    rows = _build_period_rows(start_iso, end_iso, raw["pre"], raw["in_period"], raw["post"])
+    text = _format_period_table(name, serial, start_iso, end_iso, rows, corrections)
+    await _send_long(message, text)
+
+
+def _parse_date_clamped(text: str) -> tuple[str, bool] | None:
+    """Парсит дату с автокоррекцией числа до последнего дня месяца.
+    Возвращает (iso_date, was_clamped) или None.
+    """
+    direct = _parse_input_date(text.strip())
+    if direct:
+        return direct, False
+
+    m = re.match(r'^(\d{1,2})\.(\d{1,2})\.(\d{2,4})$', text.strip())
+    if m:
+        try:
+            day, month = int(m.group(1)), int(m.group(2))
+            yr = int(m.group(3))
+            if len(m.group(3)) == 2:
+                yr += 2000 if yr < 70 else 1900
+            if 1 <= month <= 12 and day >= 1:
+                max_day = calendar.monthrange(yr, month)[1]
+                if day > max_day:
+                    return datetime(yr, month, max_day).strftime("%Y-%m-%d"), True
+        except (ValueError, OverflowError):
+            pass
+
+    return None
+
+
+def _parse_period_input(text: str) -> tuple[str, str, list[str]] | None:
+    """Извлекает две даты из строки вида 'дд.мм.гггг - дд.мм.гггг'.
+    Возвращает (start_iso, end_iso, corrections) или None.
+    """
+    matches = re.findall(r'\d{1,2}\.\d{1,2}\.\d{2,4}|\d{4}-\d{2}-\d{2}', text)
+    if len(matches) < 2:
+        return None
+
+    res_s = _parse_date_clamped(matches[0])
+    res_e = _parse_date_clamped(matches[1])
+    if not res_s or not res_e:
+        return None
+
+    start_iso, s_clamped = res_s
+    end_iso, e_clamped = res_e
+    corrections: list[str] = []
+    if s_clamped:
+        corrections.append(f"{matches[0]} → {_fmt_iso_date(start_iso)}")
+    if e_clamped:
+        corrections.append(f"{matches[1]} → {_fmt_iso_date(end_iso)}")
+    return start_iso, end_iso, corrections
+
+
+def _build_period_rows(
+    start_date: str,
+    end_date: str,
+    pre: dict | None,
+    in_period: list[dict],
+    post: dict | None,
+) -> list[dict]:
+    start_dt = datetime.strptime(start_date, "%Y-%m-%d")
+    end_dt = datetime.strptime(end_date, "%Y-%m-%d")
+    rows = []
+    current = start_dt
+    while current <= end_dt:
+        day_end = current + timedelta(days=1)
+
+        before = None
+        for rec in reversed(in_period):
+            ut = rec.get("UpdateTime")
+            if ut and ut < current:
+                before = rec
+                break
+        if before is None:
+            before = pre
+
+        on_date = None
+        for rec in reversed(in_period):
+            ut = rec.get("UpdateTime")
+            if ut and current <= ut < day_end:
+                on_date = rec
+                break
+
+        after = None
+        if not on_date:
+            for rec in in_period:
+                ut = rec.get("UpdateTime")
+                if ut and ut >= day_end:
+                    after = rec
+                    break
+            if after is None:
+                after = post
+
+        rows.append({"date": current, "before": before, "on_date": on_date, "after": after})
+        current += timedelta(days=1)
+    return rows
+
+
+def _format_period_table(
+    name: str, serial: str, start_date: str, end_date: str, rows: list[dict],
+    corrections: list[str] | None = None,
+) -> str:
+    col_date = [r["date"].strftime("%d.%m.%Y") for r in rows]
+    col_before: list[str] = []
+    col_third: list[str] = []
+
+    for r in rows:
+        col_before.append(_fmt_consumption(r["before"]))
+        if r["on_date"]:
+            col_third.append(_fmt_consumption(r["on_date"]))
+        elif r["after"]:
+            col_third.append(_fmt_consumption(r["after"]))
+        else:
+            col_third.append("нет")
+
+    col_diff = [_diff_str(b, t) for b, t in zip(col_before, col_third)]
+
+    H1, H2, H3, H4 = "Дата", "До", "На дату", "Итого"
+    w1 = max(len(H1), max((len(v) for v in col_date), default=0))
+    w2 = max(len(H2), max((len(v) for v in col_before), default=0))
+    w3 = max(len(H3), max((len(v) for v in col_third), default=0))
+    w4 = max(len(H4), max((len(v) for v in col_diff), default=0))
+
+    lines = [
+        f"{H1:<{w1}}  {H2:<{w2}}  {H3:<{w3}}  {H4}",
+        f"{'-'*w1}  {'-'*w2}  {'-'*w3}  {'-'*w4}",
+    ]
+    for d, b, t, di in zip(col_date, col_before, col_third, col_diff):
+        lines.append(f"{d:<{w1}}  {b:<{w2}}  {t:<{w3}}  {di}")
+
+    # Итог: первые и последние показания за период
+    non_empty = [v for v in col_third if v != "нет"]
+    first_val = non_empty[0] if non_empty else "нет"
+    last_val = non_empty[-1] if len(non_empty) > 1 else first_val
+
+    HS1, HS2 = "Первые", "Последние"
+    ws1 = max(len(HS1), len(first_val))
+    ws2 = max(len(HS2), len(last_val))
+    lines += [
+        "",
+        f"{HS1:<{ws1}}  {HS2}",
+        f"{'-'*ws1}  {'-'*ws2}",
+        f"{first_val:<{ws1}}  {last_val}",
+    ]
+
+    correction_note = ""
+    if corrections:
+        correction_note = (
+            "⚠️ Дата введена неправильно, приблизил к ближайшей: "
+            + "; ".join(corrections) + "\n\n"
+        )
+    header = (
+        f"<b>Показания за период</b>\n\n"
+        f"{correction_note}"
+        f"<b>Название:</b> {name}\n"
+        f"<b>Серийный:</b> <code>{_fmt_serial(serial)}</code>\n"
+        f"<b>Период:</b> {_fmt_iso_date(start_date)} — {_fmt_iso_date(end_date)}\n\n"
+    )
+    return header + "<pre>" + "\n".join(lines) + "</pre>"
+
+
+# ── /monthly + слово "Месяцы" ─────────────────────────────────────────────────
+
+_MONTH_NAMES = [
+    "", "Январь", "Февраль", "Март", "Апрель", "Май", "Июнь",
+    "Июль", "Август", "Сентябрь", "Октябрь", "Ноябрь", "Декабрь",
+]
+_MONTHLY_MAX_YEARS = 5
+
+
+@router.message(Command("monthly"))
+@router.message(F.text.func(lambda t: bool(t) and t.strip().lower() == "месяцы"))
+async def cmd_monthly(message: Message, state: FSMContext) -> None:
+    await state.clear()
+    await state.set_state(MonthlyForm.waiting_query)
+    await message.answer(
+        "<b>Помесячный отчёт</b>\n\n"
+        "Введите серийный номер, код N.М или отправьте фото со штрих-кодом.",
+        parse_mode="HTML",
+        reply_markup=ReplyKeyboardRemove(),
+    )
+
+
+@router.message(MonthlyForm.waiting_query, F.text)
+async def monthly_handle_text(message: Message, state: FSMContext) -> None:
+    serial = message.text.strip()
+    if not serial:
+        return
+    m = _NAME_CODE_RE.match(serial)
+    if m:
+        left = m.group(1).zfill(2)
+        right = m.group(2).zfill(2)
+        row = await db.get_counter_by_name_code(left, right)
+    else:
+        row = await db.get_counter_by_serial(serial)
+    await _monthly_store_counter(message, state, row, serial)
+
+
+@router.message(MonthlyForm.waiting_query, F.photo)
+async def monthly_handle_photo(message: Message, state: FSMContext, bot: Bot) -> None:
+    await message.answer("Распознаю штрих-код...")
+    photo = message.photo[-1]
+    file = await bot.get_file(photo.file_id)
+    buf = BytesIO()
+    await bot.download_file(file.file_path, destination=buf)
+
+    results = zxingcpp.read_barcodes(Image.open(buf))
+    if not results:
+        await message.answer(
+            "Штрих-код не найден на фото.\n"
+            "Попробуйте более чёткий снимок или введите номер вручную."
+        )
+        return
+
+    barcode = results[0].text.strip()
+    row = await db.get_counter_by_barcode(barcode)
+    await _monthly_store_counter(message, state, row, barcode)
+
+
+async def _monthly_store_counter(
+    message: Message, state: FSMContext, row: dict | None, query: str
+) -> None:
+    if row is None:
+        await message.answer(
+            f"Счётчик <code>{query}</code> не найден. Попробуйте ещё раз.",
+            parse_mode="HTML",
+        )
+        return
+    await state.update_data(
+        monthly_counter_id=row["Obj_Id_Counter"],
+        monthly_name=row["Name"],
+        monthly_serial=row["SerialNumber"],
+    )
+    await state.set_state(MonthlyForm.waiting_year)
+    await message.answer(
+        f"<b>{row['Name']}</b>  <code>{_fmt_serial(row['SerialNumber'])}</code>\n\n"
+        f"Введите год или диапазон лет в формате <b>гггг</b> или <b>гггг-гггг</b>\n"
+        f"(максимум {_MONTHLY_MAX_YEARS} лет):",
+        parse_mode="HTML",
+    )
+
+
+@router.message(MonthlyForm.waiting_year, F.text)
+async def monthly_handle_year(message: Message, state: FSMContext) -> None:
+    parsed = _parse_year_input(message.text.strip())
+    if parsed is None:
+        await message.answer(
+            "Неверный формат. Введите год как <b>гггг</b> или <b>гггг-гггг</b>:",
+            parse_mode="HTML",
+        )
+        return
+
+    start_year, end_year = parsed
+    if end_year < start_year:
+        await message.answer("Начало диапазона не может быть позже конца. Попробуйте снова:")
+        return
+
+    if end_year - start_year + 1 > _MONTHLY_MAX_YEARS:
+        await message.answer(
+            f"Диапазон не может превышать {_MONTHLY_MAX_YEARS} лет "
+            f"(запрошено {end_year - start_year + 1}). Попробуйте снова:"
+        )
+        return
+
+    data = await state.get_data()
+    await state.clear()
+
+    counter_id = data["monthly_counter_id"]
+    name = data["monthly_name"]
+    serial = data["monthly_serial"]
+
+    start_iso = f"{start_year}-01-01"
+    end_iso = f"{end_year}-12-31"
+    raw = await db.get_consumption_for_period(counter_id, start_iso, end_iso)
+    rows = _build_monthly_rows(start_year, 1, end_year, 12, raw["pre"], raw["in_period"], raw["post"])
+    text = _format_monthly_table(name, serial, start_year, end_year, rows)
+    await _send_long(message, text)
+
+
+def _parse_year_input(text: str) -> tuple[int, int] | None:
+    if re.fullmatch(r'\d{4}', text):
+        y = int(text)
+        return y, y
+    m = re.fullmatch(r'(\d{4})\s*[-–—]\s*(\d{4})', text)
+    if not m:
+        m = re.fullmatch(r'(\d{4})\s+(\d{4})', text)
+    if m:
+        return int(m.group(1)), int(m.group(2))
+    return None
+
+
+def _build_monthly_rows(
+    start_year: int, start_month: int,
+    end_year: int, end_month: int,
+    pre: dict | None,
+    in_period: list[dict],
+    post: dict | None,
+) -> list[dict]:
+    rows = []
+    year, month = start_year, start_month
+    while (year, month) <= (end_year, end_month):
+        month_start = datetime(year, month, 1)
+        month_end = datetime(year + 1, 1, 1) if month == 12 else datetime(year, month + 1, 1)
+
+        before = None
+        for rec in reversed(in_period):
+            ut = rec.get("UpdateTime")
+            if ut and ut < month_start:
+                before = rec
+                break
+        if before is None:
+            before = pre
+
+        in_month = [
+            r for r in in_period
+            if r.get("UpdateTime") and month_start <= r["UpdateTime"] < month_end
+        ]
+        displayed = in_month[-1] if in_month else None
+
+        rows.append({"year": year, "month": month, "before": before, "displayed": displayed})
+        month += 1
+        if month > 12:
+            month = 1
+            year += 1
+    return rows
+
+
+def _format_monthly_table(
+    name: str, serial: str, start_year: int, end_year: int, rows: list[dict]
+) -> str:
+    def _before_val(rec: dict | None) -> str:
+        if not rec:
+            return "0"
+        c = rec.get("Consumption")
+        return str(round(c)) if c is not None else "0"
+
+    cur_ym = (datetime.now().year, datetime.now().month)
+    rows = [r for r in rows if (r["year"], r["month"]) <= cur_ym]
+
+    col_year = [str(r["year"]) for r in rows]
+    col_month = [_MONTH_NAMES[r["month"]] for r in rows]
+    col_before = [_before_val(r["before"]) for r in rows]
+    col_disp = [_fmt_consumption(r["displayed"]) for r in rows]
+    col_diff = [_diff_str(b, d) for b, d in zip(col_before, col_disp)]
+
+    H1, H2, H3, H4, H5 = "Год", "Месяц", "До", "За месяц", "Итого"
+    w1 = max(len(H1), max((len(v) for v in col_year), default=0))
+    w2 = max(len(H2), max((len(v) for v in col_month), default=0))
+    w3 = max(len(H3), max((len(v) for v in col_before), default=0))
+    w4 = max(len(H4), max((len(v) for v in col_disp), default=0))
+    w5 = max(len(H5), max((len(v) for v in col_diff), default=0))
+
+    lines = [
+        f"{H1:<{w1}}  {H2:<{w2}}  {H3:<{w3}}  {H4:<{w4}}  {H5}",
+        f"{'-'*w1}  {'-'*w2}  {'-'*w3}  {'-'*w4}  {'-'*w5}",
+    ]
+    for yr, mn, b, d, di in zip(col_year, col_month, col_before, col_disp, col_diff):
+        lines.append(f"{yr:<{w1}}  {mn:<{w2}}  {b:<{w3}}  {d:<{w4}}  {di}")
+
+    period_str = str(start_year) if start_year == end_year else f"{start_year}–{end_year}"
+    header = (
+        f"<b>Помесячный отчёт</b>\n\n"
+        f"<b>Название:</b> {name}\n"
+        f"<b>Серийный:</b> <code>{_fmt_serial(serial)}</code>\n"
+        f"<b>Период:</b> {period_str}\n\n"
+    )
+    return header + "<pre>" + "\n".join(lines) + "</pre>"
+
+
 # ── Фото ──────────────────────────────────────────────────────────────────────
 
 
@@ -852,6 +1592,23 @@ def _fmt_serial(s: str) -> str:
     return s.zfill(8)
 
 
+def _diff_str(before: str, reading: str) -> str:
+    """Целочисленная разница reading - before; '—' если одно из значений не число."""
+    try:
+        return str(int(reading) - int(before))
+    except (ValueError, TypeError):
+        return "—"
+
+
+def _fmt_consumption(rec: dict | None) -> str:
+    if not rec:
+        return "нет"
+    c = rec.get("Consumption")
+    if c is None:
+        return "нет"
+    return str(round(c))
+
+
 def _fmt_iso_date(iso_date: str) -> str:
     try:
         return datetime.strptime(iso_date, "%Y-%m-%d").strftime("%d.%m.%Y")
@@ -951,6 +1708,9 @@ async def main() -> None:
         BotCommand(command="clear",    description="Очистить блокнот"),
         BotCommand(command="checkup",  description="Режим проверки"),
         BotCommand(command="checkups", description="Журнал проверок"),
+        BotCommand(command="reading",  description="Показания на дату"),
+        BotCommand(command="period",   description="Показания за период"),
+        BotCommand(command="monthly",  description="Помесячный отчёт"),
     ])
     dp = Dispatcher(storage=MemoryStorage())
     dp.message.middleware(AccessMiddleware())
