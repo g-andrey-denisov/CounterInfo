@@ -756,9 +756,6 @@ async def reading_handle_photo(message: Message, state: FSMContext, bot: Bot) ->
 def _reading_date_kb() -> InlineKeyboardMarkup:
     today = datetime.now().date()
     yesterday = today - timedelta(days=1)
-    first_current = today.replace(day=1)
-    last_prev = first_current - timedelta(days=1)
-    first_prev = last_prev.replace(day=1)
 
     def _btn(label: str, d) -> InlineKeyboardButton:
         return InlineKeyboardButton(
@@ -767,11 +764,8 @@ def _reading_date_kb() -> InlineKeyboardMarkup:
         )
 
     return InlineKeyboardMarkup(inline_keyboard=[
-        [_btn("1-й пред. месяца", first_prev)],
-        [_btn("Посл. пред. месяца", last_prev)],
-        [_btn("1-й тек. месяца", first_current)],
         [_btn("Вчера", yesterday)],
-        [_btn("Сегодня", today)],
+        [_btn("Сейчас", today)],
     ])
 
 
