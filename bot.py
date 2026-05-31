@@ -208,7 +208,8 @@ async def handle_text(message: Message) -> None:
         return
     m = _NAME_CODE_RE.match(serial)
     if m:
-        left, right = int(m.group(1)), int(m.group(2))
+        left = m.group(1).zfill(2)
+        right = m.group(2).zfill(2)
         row = await db.get_counter_by_name_code(left, right)
         await _show_counter(message, row, serial)
         return

@@ -64,9 +64,9 @@ async def get_counter_by_barcode(barcode: str) -> dict | None:
     return await _query_one(sql, (barcode.lstrip("0"),))
 
 
-async def get_counter_by_name_code(left: int, right: int) -> dict | None:
-    """Поиск по коду N.M внутри скобок в поле Name (без учёта ведущих нулей)."""
-    pattern = f'\\([^0-9)]*0*{left}\\.0*{right}[^)]*\\)'
+async def get_counter_by_name_code(left: str, right: str) -> dict | None:
+    """Поиск по точному коду N.M внутри скобок в поле Name."""
+    pattern = f'\\([^0-9)]*{left}\\.{right}[^0-9)]*\\)'
     sql = _COUNTER_QUERY.format(where="WHERE c.Name REGEXP %s")
     return await _query_one(sql, (pattern,))
 
