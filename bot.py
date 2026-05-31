@@ -239,6 +239,9 @@ async def cmd_notebook(message: Message, state: FSMContext) -> None:
 @router.message(F.text.func(lambda t: bool(t) and t.strip().lower() == "очисти"))
 async def cmd_clear(message: Message, state: FSMContext) -> None:
     await state.clear()
+    if not await local_db.notebook_count(message.from_user.id):
+        await message.answer("Блокнот пуст — нечего очищать.")
+        return
     kb = InlineKeyboardMarkup(
         inline_keyboard=[
             [

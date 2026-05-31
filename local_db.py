@@ -160,6 +160,15 @@ async def get_notebook(user_id: int) -> list[dict]:
     return [dict(r) for r in rows]
 
 
+async def notebook_count(user_id: int) -> int:
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute(
+            "SELECT COUNT(*) FROM notebook WHERE user_id = ?", (user_id,)
+        ) as cur:
+            row = await cur.fetchone()
+    return row[0] if row else 0
+
+
 async def clear_notebook(user_id: int) -> None:
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("DELETE FROM notebook WHERE user_id = ?", (user_id,))
