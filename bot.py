@@ -122,6 +122,7 @@ class CalendarNavCb(CallbackData, prefix="cln"):
     year: int
     month: int
     scope: str
+    ctx: str = ""  # для scope="period_end": ISO-дата начала периода
 
 
 class CalendarIgnoreCb(CallbackData, prefix="cli"):
@@ -130,6 +131,18 @@ class CalendarIgnoreCb(CallbackData, prefix="cli"):
 
 class CalendarOpenCb(CallbackData, prefix="clo"):
     scope: str
+
+
+class YearPickCb(CallbackData, prefix="yrp"):
+    year: int
+    scope: str  # "year_start" | "year_end"
+    ctx: str = ""  # для year_end: год начала в виде строки
+
+
+class YearNavCb(CallbackData, prefix="yrn"):
+    base: int   # первый год в гриде
+    scope: str
+    ctx: str = ""
 
 
 
@@ -370,8 +383,16 @@ async def cb_calendar_ignore(query: CallbackQuery) -> None:
 
 @router.callback_query(CalendarNavCb.filter())
 async def cb_calendar_nav(query: CallbackQuery, callback_data: CalendarNavCb) -> None:
-    extra = _calendar_quick_rows() if callback_data.scope == "reading" else _calendar_exit_row()
-    kb = _build_calendar_kb(callback_data.year, callback_data.month, callback_data.scope, extra_rows=extra)
+    scope, ctx = callback_data.scope, callback_data.ctx
+    if scope == "reading":
+        extra = _calendar_quick_rows()
+    elif scope == "checkups":
+        extra = _calendar_exit_row()
+    elif scope == "period_end":
+        extra = _calendar_period_end_rows(ctx) if ctx else None
+    else:
+        extra = None
+    kb = _build_calendar_kb(callback_data.year, callback_data.month, scope, extra_rows=extra, ctx=ctx)
     await query.message.edit_reply_markup(reply_markup=kb)
     await query.answer()
 
@@ -379,9 +400,22 @@ async def cb_calendar_nav(query: CallbackQuery, callback_data: CalendarNavCb) ->
 @router.callback_query(CalendarOpenCb.filter())
 async def cb_calendar_open(query: CallbackQuery, callback_data: CalendarOpenCb) -> None:
     today = datetime.now().date()
-    extra = _calendar_quick_rows() if callback_data.scope == "reading" else _calendar_exit_row()
-    kb = _build_calendar_kb(today.year, today.month, callback_data.scope, extra_rows=extra)
-    await query.message.edit_reply_markup(reply_markup=kb)
+    scope = callback_data.scope
+    if scope == "reading":
+        extra = _calendar_quick_rows()
+        kb = _build_calendar_kb(today.year, today.month, scope, extra_rows=extra)
+        await query.message.edit_reply_markup(reply_markup=kb)
+    elif scope == "checkups":
+        extra = _calendar_exit_row()
+        kb = _build_calendar_kb(today.year, today.month, scope, extra_rows=extra)
+        await query.message.edit_reply_markup(reply_markup=kb)
+    elif scope == "period_start":
+        kb = _build_calendar_kb(today.year, today.month, scope)
+        await query.message.edit_text(
+            f"Выберите <b>начало</b> периода\n(максимум {_PERIOD_MAX_DAYS} дней):",
+            parse_mode="HTML",
+            reply_markup=kb,
+        )
     await query.answer()
 
 
@@ -410,6 +444,65 @@ async def cb_calendar_day_checkups(
     await query.message.edit_reply_markup(reply_markup=None)
     await query.answer()
     await _show_checkups_page(query.message, iso_date, page=0)
+
+
+@router.callback_query(CalendarDayCb.filter(F.scope == "period_start"), StateFilter(PeriodForm.waiting_period))
+async def cb_calendar_day_period_start(
+    query: CallbackQuery, callback_data: CalendarDayCb, state: FSMContext
+) -> None:
+    start_iso = f"{callback_data.year:04d}-{callback_data.month:02d}-{callback_data.day:02d}"
+    await state.update_data(period_cal_start=start_iso)
+    extra = _calendar_period_end_rows(start_iso)
+    kb = _build_calendar_kb(
+        callback_data.year, callback_data.month, "period_end",
+        extra_rows=extra, ctx=start_iso,
+    )
+    await query.message.edit_text(
+        f"Начало: <b>{_fmt_iso_date(start_iso)}</b>\n\nВыберите <b>конец</b> периода:",
+        parse_mode="HTML",
+        reply_markup=kb,
+    )
+    await query.answer()
+
+
+@router.callback_query(CalendarDayCb.filter(F.scope == "period_end"), StateFilter(PeriodForm.waiting_period))
+async def cb_calendar_day_period_end(
+    query: CallbackQuery, callback_data: CalendarDayCb, state: FSMContext
+) -> None:
+    end_iso = f"{callback_data.year:04d}-{callback_data.month:02d}-{callback_data.day:02d}"
+    data = await state.get_data()
+    start_iso = data.get("period_cal_start")
+    if not start_iso:
+        await query.answer("Сначала выберите начало периода.", show_alert=True)
+        return
+
+    start_dt = datetime.strptime(start_iso, "%Y-%m-%d")
+    end_dt = datetime.strptime(end_iso, "%Y-%m-%d")
+
+    if end_dt < start_dt:
+        await query.answer("Конец периода не может быть раньше начала.", show_alert=True)
+        return
+
+    delta = (end_dt - start_dt).days + 1
+    if delta > _PERIOD_MAX_DAYS:
+        await query.answer(
+            f"Период не может превышать {_PERIOD_MAX_DAYS} дней (запрошено {delta}).",
+            show_alert=True,
+        )
+        return
+
+    await query.message.edit_reply_markup(reply_markup=None)
+    await query.answer()
+
+    counter_id = data["period_counter_id"]
+    name = data["period_name"]
+    serial = data["period_serial"]
+    await state.clear()
+
+    raw = await db.get_consumption_for_period(counter_id, start_iso, end_iso)
+    rows = _build_period_rows(start_iso, end_iso, raw["pre"], raw["in_period"], raw["post"])
+    text = _format_period_table(name, serial, start_iso, end_iso, rows)
+    await _send_long(query.message, text)
 
 
 @router.callback_query(CheckupsPageCb.filter())
@@ -856,9 +949,17 @@ def _calendar_exit_row() -> list[list[InlineKeyboardButton]]:
     return [[InlineKeyboardButton(text="Выйти", callback_data=ExitCheckupsCb().pack())]]
 
 
+def _calendar_period_end_rows(start_iso: str) -> list[list[InlineKeyboardButton]]:
+    return [[InlineKeyboardButton(
+        text=f"Начало: {_fmt_iso_date(start_iso)}",
+        callback_data=CalendarIgnoreCb().pack(),
+    )]]
+
+
 def _build_calendar_kb(
     year: int, month: int, scope: str,
     extra_rows: list[list[InlineKeyboardButton]] | None = None,
+    ctx: str = "",
 ) -> InlineKeyboardMarkup:
     prev_m = month - 1 or 12
     prev_y = year - (1 if month == 1 else 0)
@@ -868,9 +969,9 @@ def _build_calendar_kb(
     _ign = CalendarIgnoreCb().pack()
     rows: list[list[InlineKeyboardButton]] = [
         [
-            InlineKeyboardButton(text="◀", callback_data=CalendarNavCb(year=prev_y, month=prev_m, scope=scope).pack()),
+            InlineKeyboardButton(text="◀", callback_data=CalendarNavCb(year=prev_y, month=prev_m, scope=scope, ctx=ctx).pack()),
             InlineKeyboardButton(text=f"{_CAL_MONTHS[month]} {year}", callback_data=_ign),
-            InlineKeyboardButton(text="▶", callback_data=CalendarNavCb(year=next_y, month=next_m, scope=scope).pack()),
+            InlineKeyboardButton(text="▶", callback_data=CalendarNavCb(year=next_y, month=next_m, scope=scope, ctx=ctx).pack()),
         ],
         [InlineKeyboardButton(text=d, callback_data=_ign) for d in _CAL_WEEKDAYS],
     ]
@@ -1070,6 +1171,10 @@ def _period_preset_kb() -> InlineKeyboardMarkup:
         [_btn(
             f"Текущая неделя · {monday.strftime('%d.%m')}–{today.strftime('%d.%m.%Y')}",
             monday, today,
+        )],
+        [InlineKeyboardButton(
+            text="📅 Выбрать период в календаре",
+            callback_data=CalendarOpenCb(scope="period_start").pack(),
         )],
     ])
 
@@ -1315,6 +1420,53 @@ def _format_period_table(
     return header + "<pre>" + "\n".join(lines) + "</pre>"
 
 
+# ── Графический выбор года ────────────────────────────────────────────────────
+
+_YEAR_COLS = 3
+_YEAR_ROWS = 4  # 12 лет на страницу
+
+
+def _year_extra_rows_end(start_year: int) -> list[list[InlineKeyboardButton]]:
+    return [[InlineKeyboardButton(
+        text=f"Начало: {start_year}",
+        callback_data=CalendarIgnoreCb().pack(),
+    )]]
+
+
+def _build_year_kb(
+    base: int, scope: str,
+    extra_rows: list[list[InlineKeyboardButton]] | None = None,
+    ctx: str = "",
+    max_year: int | None = None,
+) -> InlineKeyboardMarkup:
+    count = _YEAR_COLS * _YEAR_ROWS
+    last = base + count - 1
+    _ign = CalendarIgnoreCb().pack()
+    rows: list[list[InlineKeyboardButton]] = [
+        [
+            InlineKeyboardButton(text="◀", callback_data=YearNavCb(base=base - count, scope=scope, ctx=ctx).pack()),
+            InlineKeyboardButton(text=f"{base}–{last}", callback_data=_ign),
+            InlineKeyboardButton(text="▶", callback_data=YearNavCb(base=base + count, scope=scope, ctx=ctx).pack()),
+        ]
+    ]
+    year = base
+    for _ in range(_YEAR_ROWS):
+        row = []
+        for _ in range(_YEAR_COLS):
+            if max_year is not None and year > max_year:
+                row.append(InlineKeyboardButton(text=" ", callback_data=_ign))
+            else:
+                row.append(InlineKeyboardButton(
+                    text=str(year),
+                    callback_data=YearPickCb(year=year, scope=scope, ctx=ctx).pack(),
+                ))
+            year += 1
+        rows.append(row)
+    if extra_rows:
+        rows.extend(extra_rows)
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
 # ── /monthly + слово "Месяцы" ─────────────────────────────────────────────────
 
 _MONTH_NAMES = [
@@ -1388,11 +1540,15 @@ async def _monthly_store_counter(
         monthly_serial=row["SerialNumber"],
     )
     await state.set_state(MonthlyForm.waiting_year)
+    cur_year = datetime.now().year
+    base = cur_year - 8
+    kb = _build_year_kb(base, "year_start", max_year=cur_year)
     await message.answer(
         f"<b>{row['Name']}</b>  <code>{_fmt_serial(row['SerialNumber'])}</code>\n\n"
-        f"Введите год или диапазон лет в формате <b>гггг</b> или <b>гггг-гггг</b>\n"
-        f"(максимум {_MONTHLY_MAX_YEARS} лет):",
+        f"Выберите год или начало диапазона (до {_MONTHLY_MAX_YEARS} лет).\n"
+        f"Можно ввести вручную: <b>гггг</b> или <b>гггг-гггг</b>:",
         parse_mode="HTML",
+        reply_markup=kb,
     )
 
 
@@ -1431,6 +1587,84 @@ async def monthly_handle_year(message: Message, state: FSMContext) -> None:
     rows = _build_monthly_rows(start_year, 1, end_year, 12, raw["pre"], raw["in_period"], raw["post"])
     text = _format_monthly_table(name, serial, start_year, end_year, rows)
     await _send_long(message, text)
+
+
+@router.callback_query(YearNavCb.filter())
+async def cb_year_nav(query: CallbackQuery, callback_data: YearNavCb) -> None:
+    scope, ctx = callback_data.scope, callback_data.ctx
+    extra = _year_extra_rows_end(int(ctx)) if scope == "year_end" and ctx else None
+    kb = _build_year_kb(callback_data.base, scope, extra_rows=extra, ctx=ctx, max_year=datetime.now().year)
+    await query.message.edit_reply_markup(reply_markup=kb)
+    await query.answer()
+
+
+@router.callback_query(YearPickCb.filter(F.scope == "year_start"), StateFilter(MonthlyForm.waiting_year))
+async def cb_year_pick_start(
+    query: CallbackQuery, callback_data: YearPickCb, state: FSMContext
+) -> None:
+    start_year = callback_data.year
+    if start_year == datetime.now().year:
+        await query.message.edit_reply_markup(reply_markup=None)
+        await query.answer()
+        data = await state.get_data()
+        await state.clear()
+        start_iso = f"{start_year}-01-01"
+        end_iso = f"{start_year}-12-31"
+        raw = await db.get_consumption_for_period(data["monthly_counter_id"], start_iso, end_iso)
+        rows = _build_monthly_rows(start_year, 1, start_year, 12, raw["pre"], raw["in_period"], raw["post"])
+        text = _format_monthly_table(data["monthly_name"], data["monthly_serial"], start_year, start_year, rows)
+        await _send_long(query.message, text)
+        return
+
+    await state.update_data(monthly_cal_start=start_year)
+    extra = _year_extra_rows_end(start_year)
+    kb = _build_year_kb(start_year, "year_end", extra_rows=extra, ctx=str(start_year), max_year=datetime.now().year)
+    await query.message.edit_text(
+        f"Начало: <b>{start_year}</b>\n\n"
+        f"Выберите <b>конец</b> диапазона (до {_MONTHLY_MAX_YEARS} лет):",
+        parse_mode="HTML",
+        reply_markup=kb,
+    )
+    await query.answer()
+
+
+@router.callback_query(YearPickCb.filter(F.scope == "year_end"), StateFilter(MonthlyForm.waiting_year))
+async def cb_year_pick_end(
+    query: CallbackQuery, callback_data: YearPickCb, state: FSMContext
+) -> None:
+    end_year = callback_data.year
+    data = await state.get_data()
+    start_year = data.get("monthly_cal_start")
+    if start_year is None:
+        await query.answer("Сначала выберите начало диапазона.", show_alert=True)
+        return
+
+    if end_year < start_year:
+        await query.answer("Год конца не может быть раньше начала.", show_alert=True)
+        return
+
+    if end_year - start_year + 1 > _MONTHLY_MAX_YEARS:
+        await query.answer(
+            f"Диапазон не может превышать {_MONTHLY_MAX_YEARS} лет "
+            f"(запрошено {end_year - start_year + 1}).",
+            show_alert=True,
+        )
+        return
+
+    await query.message.edit_reply_markup(reply_markup=None)
+    await query.answer()
+
+    counter_id = data["monthly_counter_id"]
+    name = data["monthly_name"]
+    serial = data["monthly_serial"]
+    await state.clear()
+
+    start_iso = f"{start_year}-01-01"
+    end_iso = f"{end_year}-12-31"
+    raw = await db.get_consumption_for_period(counter_id, start_iso, end_iso)
+    rows = _build_monthly_rows(start_year, 1, end_year, 12, raw["pre"], raw["in_period"], raw["post"])
+    text = _format_monthly_table(name, serial, start_year, end_year, rows)
+    await _send_long(query.message, text)
 
 
 def _parse_year_input(text: str) -> tuple[int, int] | None:
