@@ -111,6 +111,27 @@ class ReadingDateCb(CallbackData, prefix="rdt"):
     date: str  # ISO YYYY-MM-DD
 
 
+class CalendarDayCb(CallbackData, prefix="cal"):
+    year: int
+    month: int
+    day: int
+    scope: str  # "reading" | "checkups"
+
+
+class CalendarNavCb(CallbackData, prefix="cln"):
+    year: int
+    month: int
+    scope: str
+
+
+class CalendarIgnoreCb(CallbackData, prefix="cli"):
+    pass
+
+
+class CalendarOpenCb(CallbackData, prefix="clo"):
+    scope: str
+
+
 
 
 class CheckupsPageCb(CallbackData, prefix="csp"):
@@ -342,6 +363,55 @@ async def cb_checkups_date(
     await _show_checkups_page(query.message, callback_data.date, page=0)
 
 
+@router.callback_query(CalendarIgnoreCb.filter())
+async def cb_calendar_ignore(query: CallbackQuery) -> None:
+    await query.answer()
+
+
+@router.callback_query(CalendarNavCb.filter())
+async def cb_calendar_nav(query: CallbackQuery, callback_data: CalendarNavCb) -> None:
+    extra = _calendar_quick_rows() if callback_data.scope == "reading" else _calendar_exit_row()
+    kb = _build_calendar_kb(callback_data.year, callback_data.month, callback_data.scope, extra_rows=extra)
+    await query.message.edit_reply_markup(reply_markup=kb)
+    await query.answer()
+
+
+@router.callback_query(CalendarOpenCb.filter())
+async def cb_calendar_open(query: CallbackQuery, callback_data: CalendarOpenCb) -> None:
+    today = datetime.now().date()
+    extra = _calendar_quick_rows() if callback_data.scope == "reading" else _calendar_exit_row()
+    kb = _build_calendar_kb(today.year, today.month, callback_data.scope, extra_rows=extra)
+    await query.message.edit_reply_markup(reply_markup=kb)
+    await query.answer()
+
+
+@router.callback_query(CalendarDayCb.filter(F.scope == "reading"), StateFilter(ReadingForm.waiting_date))
+async def cb_calendar_day_reading(
+    query: CallbackQuery, callback_data: CalendarDayCb, state: FSMContext
+) -> None:
+    iso_date = f"{callback_data.year:04d}-{callback_data.month:02d}-{callback_data.day:02d}"
+    await query.message.edit_reply_markup(reply_markup=None)
+    await query.answer()
+    data = await state.get_data()
+    await state.clear()
+    readings = await db.get_consumption_around_date(data["reading_counter_id"], iso_date)
+    await query.message.answer(
+        _format_readings(data["reading_name"], data["reading_serial"], iso_date, readings),
+        parse_mode="HTML",
+    )
+
+
+@router.callback_query(CalendarDayCb.filter(F.scope == "checkups"), StateFilter(CheckupsForm.waiting_date))
+async def cb_calendar_day_checkups(
+    query: CallbackQuery, callback_data: CalendarDayCb, state: FSMContext
+) -> None:
+    iso_date = f"{callback_data.year:04d}-{callback_data.month:02d}-{callback_data.day:02d}"
+    await state.clear()
+    await query.message.edit_reply_markup(reply_markup=None)
+    await query.answer()
+    await _show_checkups_page(query.message, iso_date, page=0)
+
+
 @router.callback_query(CheckupsPageCb.filter())
 async def cb_checkups_page(query: CallbackQuery, callback_data: CheckupsPageCb) -> None:
     items, total = await local_db.get_checkups_by_date(
@@ -398,6 +468,10 @@ def _build_checkups_date_kb(dates: list[str]) -> InlineKeyboardMarkup:
         text=_fmt_iso_date(d),
         callback_data=CheckupsDateCb(date=d).pack(),
     )] for d in dates]
+    rows.append([InlineKeyboardButton(
+        text="📅 Выбрать в календаре",
+        callback_data=CalendarOpenCb(scope="checkups").pack(),
+    )])
     rows.append([InlineKeyboardButton(
         text="Выйти",
         callback_data=ExitCheckupsCb().pack(),
@@ -753,7 +827,14 @@ async def reading_handle_photo(message: Message, state: FSMContext, bot: Bot) ->
     await _reading_store_counter(message, state, row, barcode)
 
 
-def _reading_date_kb() -> InlineKeyboardMarkup:
+_CAL_WEEKDAYS = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]
+_CAL_MONTHS = [
+    "", "Январь", "Февраль", "Март", "Апрель", "Май", "Июнь",
+    "Июль", "Август", "Сентябрь", "Октябрь", "Ноябрь", "Декабрь",
+]
+
+
+def _calendar_quick_rows() -> list[list[InlineKeyboardButton]]:
     today = datetime.now().date()
     yesterday = today - timedelta(days=1)
     first_current = today.replace(day=1)
@@ -764,11 +845,52 @@ def _reading_date_kb() -> InlineKeyboardMarkup:
             callback_data=ReadingDateCb(date=d.strftime("%Y-%m-%d")).pack(),
         )
 
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [_btn("На первое число месяца", first_current)],
+    return [
+        [_btn("На первое", first_current)],
         [_btn("Вчера", yesterday)],
         [_btn("Сейчас", today)],
-    ])
+    ]
+
+
+def _calendar_exit_row() -> list[list[InlineKeyboardButton]]:
+    return [[InlineKeyboardButton(text="Выйти", callback_data=ExitCheckupsCb().pack())]]
+
+
+def _build_calendar_kb(
+    year: int, month: int, scope: str,
+    extra_rows: list[list[InlineKeyboardButton]] | None = None,
+) -> InlineKeyboardMarkup:
+    prev_m = month - 1 or 12
+    prev_y = year - (1 if month == 1 else 0)
+    next_m = month % 12 + 1
+    next_y = year + (1 if month == 12 else 0)
+
+    _ign = CalendarIgnoreCb().pack()
+    rows: list[list[InlineKeyboardButton]] = [
+        [
+            InlineKeyboardButton(text="◀", callback_data=CalendarNavCb(year=prev_y, month=prev_m, scope=scope).pack()),
+            InlineKeyboardButton(text=f"{_CAL_MONTHS[month]} {year}", callback_data=_ign),
+            InlineKeyboardButton(text="▶", callback_data=CalendarNavCb(year=next_y, month=next_m, scope=scope).pack()),
+        ],
+        [InlineKeyboardButton(text=d, callback_data=_ign) for d in _CAL_WEEKDAYS],
+    ]
+    ign_btn = InlineKeyboardButton(text=" ", callback_data=_ign)
+    for week in calendar.monthcalendar(year, month):
+        rows.append([
+            InlineKeyboardButton(
+                text=str(day),
+                callback_data=CalendarDayCb(year=year, month=month, day=day, scope=scope).pack(),
+            ) if day else ign_btn
+            for day in week
+        ])
+    if extra_rows:
+        rows.extend(extra_rows)
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def _reading_date_kb() -> InlineKeyboardMarkup:
+    today = datetime.now().date()
+    return _build_calendar_kb(today.year, today.month, "reading", extra_rows=_calendar_quick_rows())
 
 
 async def _reading_store_counter(
