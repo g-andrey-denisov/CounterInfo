@@ -16,7 +16,13 @@ from aiogram.types import (
 )
 
 import local_db
-from callbacks import AccessDecisionCb, RequestAccessCb, UserAddCb, UserDeleteCb
+from callbacks import (
+    AccessDecisionCb,
+    RequestAccessCb,
+    UserAddCb,
+    UserDeleteCb,
+    UserDeleteConfirmCb,
+)
 from config import settings
 from states import AccessForm
 
@@ -181,15 +187,7 @@ async def _send_users_list(message: Message) -> None:
     )
 
 
-@router.callback_query(UserDeleteCb.filter())
-async def cb_user_delete(
-    query: CallbackQuery, callback_data: UserDeleteCb, is_admin: bool
-) -> None:
-    if not is_admin:
-        await query.answer("Только для администраторов.", show_alert=True)
-        return
-    removed = await local_db.remove_user(callback_data.user_id)
-    await query.answer("Удалён." if removed else "Пользователь не найден.")
+async def _refresh_users_list(query: CallbackQuery) -> None:
     users = await local_db.get_users()
     header = (
         f"<b>Пользователи с доступом ({len(users)})</b>"
@@ -200,6 +198,64 @@ async def cb_user_delete(
         await query.message.edit_text(
             header, parse_mode="HTML", reply_markup=_users_keyboard(users)
         )
+
+
+@router.callback_query(UserDeleteCb.filter())
+async def cb_user_delete(
+    query: CallbackQuery, callback_data: UserDeleteCb, is_admin: bool
+) -> None:
+    if not is_admin:
+        await query.answer("Только для администраторов.", show_alert=True)
+        return
+
+    users = await local_db.get_users()
+    target = next((u for u in users if u["user_id"] == callback_data.user_id), None)
+    if target is None:
+        await query.answer("Пользователь не найден.")
+        await _refresh_users_list(query)
+        return
+
+    await query.answer()
+    kb = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="🗑 Да, удалить",
+                    callback_data=UserDeleteConfirmCb(
+                        user_id=callback_data.user_id, yes=1
+                    ).pack(),
+                ),
+                InlineKeyboardButton(
+                    text="Отмена",
+                    callback_data=UserDeleteConfirmCb(
+                        user_id=callback_data.user_id, yes=0
+                    ).pack(),
+                ),
+            ]
+        ]
+    )
+    if query.message:
+        await query.message.edit_text(
+            f"Удалить пользователя <b>{_row_label(target)}</b> "
+            f"(<code>{target['user_id']}</code>)?",
+            parse_mode="HTML",
+            reply_markup=kb,
+        )
+
+
+@router.callback_query(UserDeleteConfirmCb.filter())
+async def cb_user_delete_confirm(
+    query: CallbackQuery, callback_data: UserDeleteConfirmCb, is_admin: bool
+) -> None:
+    if not is_admin:
+        await query.answer("Только для администраторов.", show_alert=True)
+        return
+    if callback_data.yes:
+        removed = await local_db.remove_user(callback_data.user_id)
+        await query.answer("Удалён." if removed else "Пользователь не найден.")
+    else:
+        await query.answer("Отменено.")
+    await _refresh_users_list(query)
 
 
 @router.callback_query(UserAddCb.filter())

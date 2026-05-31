@@ -47,15 +47,21 @@ WELCOME = (
     "<b>Проверка</b>, <b>Проверки</b>, <b>Показания</b>, <b>Период</b>, <b>Месяцы</b>."
 )
 
+ADMIN_SECTION = (
+    "\n\n<b>Администрирование:</b>\n"
+    "  /users — управление доступом пользователей"
+)
+
 
 # ── /start, /help ─────────────────────────────────────────────────────────────
 
 
 @router.message(CommandStart())
 @router.message(Command("help"))
-async def cmd_help(message: Message, state: FSMContext) -> None:
+async def cmd_help(message: Message, state: FSMContext, is_admin: bool = False) -> None:
     await state.clear()
-    await message.answer(WELCOME, parse_mode="HTML", reply_markup=ReplyKeyboardRemove())
+    text = WELCOME + ADMIN_SECTION if is_admin else WELCOME
+    await message.answer(text, parse_mode="HTML", reply_markup=ReplyKeyboardRemove())
 
 
 # ── Фото ──────────────────────────────────────────────────────────────────────

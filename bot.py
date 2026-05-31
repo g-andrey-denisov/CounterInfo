@@ -11,7 +11,7 @@ from pathlib import Path
 
 from aiogram import Bot, Dispatcher
 from aiogram.fsm.storage.memory import MemoryStorage
-from aiogram.types import BotCommand
+from aiogram.types import BotCommand, BotCommandScopeChat
 
 import db
 import local_db
@@ -61,7 +61,7 @@ async def main() -> None:
         logger.info("Counter cache synced: %d entries", len(counters))
 
     bot = Bot(token=settings.BOT_TOKEN)
-    await bot.set_my_commands([
+    base_commands = [
         BotCommand(command="help",     description="Справка"),
         BotCommand(command="notebook", description="Блокнот"),
         BotCommand(command="clear",    description="Очистить блокнот"),
@@ -70,7 +70,20 @@ async def main() -> None:
         BotCommand(command="reading",  description="Показания на дату"),
         BotCommand(command="period",   description="Показания за период"),
         BotCommand(command="monthly",  description="Помесячный отчёт"),
-    ])
+    ]
+    await bot.set_my_commands(base_commands)
+
+    # Персональное меню администратора: базовые команды + управление доступом.
+    admin_commands = base_commands + [
+        BotCommand(command="users", description="Управление пользователями"),
+    ]
+    for admin_id in settings.ADMIN_IDS:
+        try:
+            await bot.set_my_commands(
+                admin_commands, scope=BotCommandScopeChat(chat_id=admin_id)
+            )
+        except Exception:
+            logger.warning("Не удалось задать команды для администратора %s", admin_id)
     dp = Dispatcher(storage=MemoryStorage())
     dp.message.middleware(AccessMiddleware())
     dp.callback_query.middleware(AccessMiddleware())

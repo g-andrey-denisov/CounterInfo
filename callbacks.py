@@ -102,8 +102,14 @@ class AccessDecisionCb(CallbackData, prefix="acd"):
 
 
 class UserDeleteCb(CallbackData, prefix="usd"):
-    """Удаление пользователя из списка доступа (admin)."""
+    """Запрос подтверждения удаления пользователя (admin)."""
     user_id: int
+
+
+class UserDeleteConfirmCb(CallbackData, prefix="usdc"):
+    """Решение по подтверждению удаления (admin)."""
+    user_id: int
+    yes: int  # 1 = удалить, 0 = отмена
 
 
 class UserAddCb(CallbackData, prefix="usa"):
