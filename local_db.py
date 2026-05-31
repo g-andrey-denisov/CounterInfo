@@ -29,6 +29,18 @@ CREATE TABLE IF NOT EXISTS cache_meta (
     key   TEXT PRIMARY KEY,
     value TEXT
 );
+
+CREATE TABLE IF NOT EXISTS checkup (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    checked_at    TEXT    NOT NULL,
+    user_id       INTEGER NOT NULL,
+    user_name     TEXT,
+    serial_number TEXT    NOT NULL,
+    name          TEXT,
+    status        TEXT    NOT NULL,
+    reading       TEXT,
+    comment       TEXT
+);
 """
 
 
@@ -152,3 +164,121 @@ async def clear_notebook(user_id: int) -> None:
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("DELETE FROM notebook WHERE user_id = ?", (user_id,))
         await db.commit()
+
+
+# ── Checkup ───────────────────────────────────────────────────────────────────
+
+async def add_checkup_entry(
+    user_id: int,
+    user_name: str | None,
+    serial: str,
+    name: str | None,
+    status: str,
+    reading: str | None,
+    comment: str | None,
+) -> int:
+    checked_at = datetime.now().strftime("%Y-%m-%d %H:%M")
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute(
+            """
+            INSERT INTO checkup
+                (checked_at, user_id, user_name, serial_number, name, status, reading, comment)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (checked_at, user_id, user_name, serial, name, status, reading, comment),
+        )
+        await db.commit()
+        return cur.lastrowid
+
+
+async def get_unchecked_counters(offset: int = 0, limit: int = 15) -> tuple[list[dict], int]:
+    """Возвращает (страница, всего) для счётчиков без проверки или с давней проверкой.
+    Исключает счётчики с 'снят'/'демонтирован' в названии."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute("""
+            SELECT
+                cc.serial_number,
+                cc.name,
+                MAX(ch.checked_at) AS last_check
+            FROM counter_cache cc
+            LEFT JOIN checkup ch ON cc.serial_number = ch.serial_number
+            GROUP BY cc.serial_number, cc.name
+            ORDER BY cc.name ASC
+        """) as cur:
+            rows = await cur.fetchall()
+
+    excluded = {"снят", "демонтирован"}
+    filtered = [
+        dict(r) for r in rows
+        if not any(kw in (r["name"] or "").lower() for kw in excluded)
+    ]
+    total = len(filtered)
+    return filtered[offset : offset + limit], total
+
+
+def _raw_to_iso(raw: str) -> str:
+    """Нормализует дату в строку ISO YYYY-MM-DD независимо от исходного формата."""
+    for fmt in ("%Y-%m-%d", "%d.%m.%Y"):
+        try:
+            return datetime.strptime(raw, fmt).strftime("%Y-%m-%d")
+        except ValueError:
+            pass
+    return raw
+
+
+async def get_checkup_dates(limit: int = 5) -> list[str]:
+    """Возвращает последние N уникальных дат проверки (ISO YYYY-MM-DD), новые первыми.
+    Обрабатывает смешанные форматы дат в таблице."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute(
+            "SELECT DISTINCT substr(checked_at, 1, 10) FROM checkup"
+        ) as cur:
+            rows = await cur.fetchall()
+
+    seen: set[str] = set()
+    result: list[str] = []
+    # нормализуем все даты и сортируем по убыванию
+    iso_dates = sorted(
+        {_raw_to_iso(row[0]) for row in rows},
+        reverse=True,
+    )
+    for d in iso_dates:
+        if d not in seen:
+            seen.add(d)
+            result.append(d)
+            if len(result) >= limit:
+                break
+    return result
+
+
+async def get_checkups_by_date(
+    date_iso: str, offset: int = 0, limit: int = 10
+) -> tuple[list[dict], int]:
+    """Возвращает (страница, итого) проверок за указанную дату.
+    Ищет записи в обоих форматах (ISO и старом дд.мм.гггг)."""
+    try:
+        old_fmt = datetime.strptime(date_iso, "%Y-%m-%d").strftime("%d.%m.%Y")
+    except ValueError:
+        old_fmt = date_iso
+    iso_p = f"{date_iso}%"
+    old_p = f"{old_fmt}%"
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT COUNT(*) FROM checkup WHERE checked_at LIKE ? OR checked_at LIKE ?",
+            (iso_p, old_p),
+        ) as cur:
+            row = await cur.fetchone()
+            total = row[0] if row else 0
+        async with db.execute(
+            """
+            SELECT * FROM checkup
+            WHERE checked_at LIKE ? OR checked_at LIKE ?
+            ORDER BY id ASC
+            LIMIT ? OFFSET ?
+            """,
+            (iso_p, old_p, limit, offset),
+        ) as cur:
+            rows = await cur.fetchall()
+    return [dict(r) for r in rows], total
