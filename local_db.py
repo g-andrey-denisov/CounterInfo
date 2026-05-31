@@ -41,6 +41,21 @@ CREATE TABLE IF NOT EXISTS checkup (
     reading       TEXT,
     comment       TEXT
 );
+
+CREATE TABLE IF NOT EXISTS app_user (
+    user_id   INTEGER PRIMARY KEY,
+    username  TEXT,
+    full_name TEXT,
+    added_at  TEXT,
+    added_by  INTEGER
+);
+
+CREATE TABLE IF NOT EXISTS access_request (
+    user_id      INTEGER PRIMARY KEY,
+    username     TEXT,
+    full_name    TEXT,
+    requested_at TEXT
+);
 """
 
 
@@ -259,6 +274,91 @@ async def get_checkup_dates(limit: int = 5) -> list[str]:
             if len(result) >= limit:
                 break
     return result
+
+
+# ── Access: пользователи с доступом ───────────────────────────────────────────
+
+async def is_user_allowed(user_id: int) -> bool:
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute(
+            "SELECT 1 FROM app_user WHERE user_id = ?", (user_id,)
+        ) as cur:
+            return await cur.fetchone() is not None
+
+
+async def add_user(
+    user_id: int,
+    username: str | None,
+    full_name: str | None,
+    added_by: int | None,
+) -> bool:
+    """Добавляет пользователя. Возвращает False, если он уже был в списке."""
+    added_at = datetime.now().strftime("%Y-%m-%d %H:%M")
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute(
+            """
+            INSERT OR IGNORE INTO app_user
+                (user_id, username, full_name, added_at, added_by)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (user_id, username, full_name, added_at, added_by),
+        )
+        await db.commit()
+        return cur.rowcount > 0
+
+
+async def remove_user(user_id: int) -> bool:
+    """Удаляет пользователя. Возвращает False, если его не было."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute("DELETE FROM app_user WHERE user_id = ?", (user_id,))
+        await db.commit()
+        return cur.rowcount > 0
+
+
+async def get_users() -> list[dict]:
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT * FROM app_user ORDER BY added_at ASC, user_id ASC"
+        ) as cur:
+            rows = await cur.fetchall()
+    return [dict(r) for r in rows]
+
+
+# ── Access: заявки на доступ ───────────────────────────────────────────────────
+
+async def add_access_request(
+    user_id: int, username: str | None, full_name: str | None
+) -> bool:
+    """Регистрирует заявку. Возвращает False, если заявка уже существует."""
+    requested_at = datetime.now().strftime("%Y-%m-%d %H:%M")
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute(
+            """
+            INSERT OR IGNORE INTO access_request
+                (user_id, username, full_name, requested_at)
+            VALUES (?, ?, ?, ?)
+            """,
+            (user_id, username, full_name, requested_at),
+        )
+        await db.commit()
+        return cur.rowcount > 0
+
+
+async def get_access_request(user_id: int) -> dict | None:
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT * FROM access_request WHERE user_id = ?", (user_id,)
+        ) as cur:
+            row = await cur.fetchone()
+    return dict(row) if row else None
+
+
+async def delete_access_request(user_id: int) -> None:
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("DELETE FROM access_request WHERE user_id = ?", (user_id,))
+        await db.commit()
 
 
 async def get_checkups_by_date(

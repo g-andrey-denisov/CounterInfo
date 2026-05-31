@@ -10,6 +10,7 @@
 from aiogram import Router
 
 from . import (
+    access,
     calendars,
     checkup,
     checkups,
@@ -23,6 +24,7 @@ from . import (
 
 def build_router() -> Router:
     root = Router()
+    root.include_router(access.router)
     root.include_router(notebook.router)
     root.include_router(checkups.router)
     root.include_router(checkup.router)

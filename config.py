@@ -17,8 +17,10 @@ class Settings:
     DB_USER: str = os.getenv("DB_USER", "resource")
     DB_PASSWORD: str = os.getenv("DB_PASSWORD", "resource")
     DB_NAME: str = os.getenv("DB_NAME", "resource")
-    ALLOWED_USER_IDS: list[int] = field(
-        default_factory=lambda: _parse_ids(os.getenv("ALLOWED_USER_IDS", ""))
+    # Telegram ID администраторов: получают заявки на доступ и управляют
+    # списком пользователей. Доступ остальных пользователей ведётся в БД.
+    ADMIN_IDS: list[int] = field(
+        default_factory=lambda: _parse_ids(os.getenv("ADMIN_IDS", ""))
     )
 
 

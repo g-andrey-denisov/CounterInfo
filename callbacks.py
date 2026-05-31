@@ -85,3 +85,27 @@ class CheckupsPageCb(CallbackData, prefix="csp"):
 
 class ExitCheckupsCb(CallbackData, prefix="excs"):
     pass
+
+
+# ── Доступ ─────────────────────────────────────────────────────────────────────
+
+
+class RequestAccessCb(CallbackData, prefix="req"):
+    """Кнопка «Запросить доступ» для неизвестного пользователя."""
+    pass
+
+
+class AccessDecisionCb(CallbackData, prefix="acd"):
+    """Решение администратора по заявке."""
+    user_id: int
+    approve: int  # 1 = принять, 0 = отклонить
+
+
+class UserDeleteCb(CallbackData, prefix="usd"):
+    """Удаление пользователя из списка доступа (admin)."""
+    user_id: int
+
+
+class UserAddCb(CallbackData, prefix="usa"):
+    """Кнопка «Добавить вручную» (admin)."""
+    pass

@@ -30,3 +30,7 @@ class PeriodForm(StatesGroup):
 class MonthlyForm(StatesGroup):
     waiting_query = State()
     waiting_year = State()
+
+
+class AccessForm(StatesGroup):
+    waiting_user_id = State()  # админ вводит Telegram ID нового пользователя
