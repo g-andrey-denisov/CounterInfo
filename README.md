@@ -196,10 +196,27 @@ journalctl --user -u counterinfo -f
 
 ```
 CounterInfo/
-├── bot.py          — основной файл бота (handlers, FSM, middleware)
+├── bot.py          — точка входа: логирование, инициализация БД, запуск polling
+├── config.py       — настройки из .env
+├── constants.py    — общие константы (ключевые слова, лимиты, размеры страниц)
+├── states.py       — FSM-состояния
+├── callbacks.py    — CallbackData для inline-кнопок
+├── middlewares.py  — AccessMiddleware (ограничение доступа)
+├── formatting.py   — форматтеры и парсеры (даты, показания, серийники)
+├── keyboards.py    — построители клавиатур (календарь, годы, пресеты, навигация)
+├── search.py       — поиск счётчика по тексту и штрих-коду с фото
 ├── db.py           — запросы к MariaDB (пул соединений aiomysql)
 ├── local_db.py     — SQLite: блокнот, кэш счётчиков, журнал проверок
-├── config.py       — настройки из .env
+├── handlers/       — обработчики по разделам
+│   ├── __init__.py   — build_router(): сборка корневого роутера
+│   ├── common.py     — /start, /help, поиск по умолчанию, запись в блокнот
+│   ├── notebook.py   — /notebook, /clear
+│   ├── checkup.py    — /checkup: режим проверки
+│   ├── checkups.py   — /checkups: журнал проверок
+│   ├── reading.py    — /reading: показания на дату
+│   ├── period.py     — /period: посуточный отчёт
+│   ├── monthly.py    — /monthly: помесячный отчёт
+│   └── calendars.py  — общие callback'и календаря и сетки годов
 ├── run.py          — запуск с авто-перезапуском (только для разработки)
 ├── requirements.txt
 ├── .env            — секреты (не коммитить!)
